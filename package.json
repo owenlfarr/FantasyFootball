@@ -1,5 +1,5 @@
 {
-  "name": "site-creator-vinext-starter",
+  "name": "fantasy-command-center",
   "version": "0.1.0",
   "private": true,
   "engines": {
@@ -9,8 +9,14 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/engine/*.test.ts",
+    "test:render": "npm run build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "benchmark:engine": "node scripts/benchmark-engine.mjs",
+    "backtest:v6": "tsx scripts/v6-backtest.mts",
+    "train:v6": "tsx scripts/train-v6.mts",
+    "capture:forecasts": "tsx scripts/capture-forecasts.mts",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
@@ -37,6 +43,7 @@
     "globals": "16.4.0",
     "react-server-dom-webpack": "19.2.6",
     "tailwindcss": "4.2.1",
+    "tsx": "^4.20.6",
     "typescript": "5.9.3",
     "typescript-eslint": "8.59.3",
     "vinext": "1.0.0-beta.2",

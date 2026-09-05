@@ -1,4 +1,6 @@
-# vinext-starter
+# Fantasy Command Center
+
+A desktop-first fantasy-football roster dashboard with a deterministic, explainable, roster-relative intelligence engine. See the [V1 roster evaluator](docs/ENGINE_V1.md) and [V2 search engine](docs/ENGINE_V2.md) documentation.
 
 A clean full-stack starter running on
 [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
@@ -47,7 +49,9 @@ export default async function Home() {
   const requestHeaders = await headers();
   const userId = requestHeaders.get("oai-authenticated-user-id");
   const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
+  const encodedFullName = requestHeaders.get(
+    "oai-authenticated-user-full-name",
+  );
   const fullName =
     encodedFullName &&
     requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
@@ -98,3 +102,9 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)
 - [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+
+## Intelligence Architecture
+
+- [V1 roster evaluator](docs/ENGINE_V1.md)
+- [V2 transaction search](docs/ENGINE_V2.md)
+- [V3 player and market intelligence](docs/ENGINE_V3.md)
