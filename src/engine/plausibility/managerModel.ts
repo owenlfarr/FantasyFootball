@@ -1,6 +1,7 @@
 import type { LeagueSnapshot } from "../types";
 import type { LeagueIntelligence } from "../intelligence/types";
-import type { TradeSearchResult } from "../search/types";
+import type { MarketFairness, OpponentFit } from "../search/types";
+import type { TransactionEvaluation } from "../types";
 import {
   type DealPlausibility,
   type ManagerNote,
@@ -80,9 +81,16 @@ function isOpLeague(snapshot: LeagueSnapshot) {
     slot.kind === "active" && slot.eligiblePositions.includes("QB") && slot.eligiblePositions.length > 1,
   );
 }
+export interface DealPlausibilityInput {
+  trade: { teamAGives: string[]; teamBGives: string[] };
+  evaluation: TransactionEvaluation;
+  opponentTeamId: string;
+  opponentFit: OpponentFit;
+  marketFairness: MarketFairness;
+}
 function managerAdjustment(
   profile: ManagerTradeProfile | undefined,
-  result: TradeSearchResult,
+  result: DealPlausibilityInput,
 ): { value: number; reasons: DealPlausibility["reasons"]; risks: DealPlausibility["risks"] } {
   if (!profile) return { value: 0, reasons: [], risks: [] };
   const evidenceWeight = clamp(profile.sampleSize / 12, 0, 1);
@@ -108,7 +116,7 @@ function managerAdjustment(
 
 /** Cheap, deterministic plausibility scorer. It consumes already-computed V1/V2/V4 data and never calls roster evaluation. */
 export function evaluateDealPlausibility(
-  result: TradeSearchResult,
+  result: DealPlausibilityInput,
   context: PlausibilityContext,
 ): DealPlausibility {
   const { snapshot, intelligence } = context;

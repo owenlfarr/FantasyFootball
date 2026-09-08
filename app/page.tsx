@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -24,13 +24,14 @@ import {
 } from "lucide-react";
 import {
   navigation,
-  roster as mockRoster,
   tradeIdeas,
   waiverTargets,
   type Player,
   type RosterFilter,
   type TeamSnapshot,
 } from "./data";
+import { ManualTradeBuilder } from "./components/ManualTradeBuilder";
+import { EspnSyncController, type EspnSyncSnapshot } from "../src/client/espnSyncController";
 
 const iconMap = {
   dashboard: LayoutDashboard,
@@ -92,54 +93,61 @@ function Sidebar({
   );
 }
 
-function TopBar({
+export function TopBar({
   week,
   setWeek,
   onSync,
+  syncState,
+  lastSuccessfulAt,
+  team,
+  onPerspective,
 }: {
-  week: number;
+  week?: number;
   setWeek: (week: number) => void;
   onSync: () => Promise<void>;
+  syncState: EspnSyncSnapshot<TeamSnapshot>["state"];
+  lastSuccessfulAt?: number;
+  team?: TeamSnapshot;
+  onPerspective?: (value: "MY_TEAM" | "MARVIN_TEAM") => void;
 }) {
-  const [syncing, setSyncing] = useState(false);
-  const sync = async () => {
-    setSyncing(true);
-    await onSync();
-    window.setTimeout(() => setSyncing(false), 450);
-  };
+  const syncing = syncState === "SYNCING" || syncState === "REFRESHING";
+  const displayWeek = week ?? 1;
+  const [now, setNow] = useState(0);
+  useEffect(() => { const initial = window.setTimeout(() => setNow(Date.now()), 0); const timer = window.setInterval(() => setNow(Date.now()), 60000); return () => { window.clearTimeout(initial); window.clearInterval(timer); }; }, []);
+  const age = lastSuccessfulAt ? Math.max(0, Math.floor((now - lastSuccessfulAt) / 60000)) : undefined;
   return (
     <header className="topbar">
       <div>
-        <div className="eyebrow">MY TEAM</div>
-        <h1>Hi My Name&apos;s Charlie McGlaughon</h1>
+        <div className="eyebrow">VIEWING AS</div>
+        <h1>{team?.teamName ?? "Hi My Name's Charlie McGlaughon"}</h1>
         <p>
           Magnet <span>•</span> 12 Team <span>•</span> Full PPR
         </p>
       </div>
       <div className="top-actions">
+        {team && <label className="team-perspective"><span>Viewing as</span><select aria-label="Team perspective" value={team.selectedPerspective ?? "MY_TEAM"} onChange={(event) => onPerspective?.(event.target.value as "MY_TEAM" | "MARVIN_TEAM")}>{(team.perspectives ?? [{ perspective: "MY_TEAM", label: "My Team", available: true }]).map((option) => <option key={option.perspective} value={option.perspective} disabled={!option.available}>{option.label}{option.teamName ? ` — ${option.teamName}` : " unavailable"}</option>)}</select></label>}
         <button className="search-button" aria-label="Search">
           <Search size={17} />
         </button>
         <div className="week-control" aria-label="Week selector">
           <button
-            onClick={() => setWeek(Math.max(1, week - 1))}
+            onClick={() => setWeek(Math.max(1, displayWeek - 1))}
             aria-label="Previous week"
+            disabled={!week}
           >
             <ChevronLeft size={17} />
           </button>
-          <span>Week {week}</span>
+          <span>Week {week ?? "—"}</span>
           <button
-            onClick={() => setWeek(Math.min(18, week + 1))}
+            onClick={() => setWeek(Math.min(18, displayWeek + 1))}
             aria-label="Next week"
+            disabled={!week}
           >
             <ChevronRight size={17} />
           </button>
         </div>
-        <button
-          className={`sync-button ${syncing ? "syncing" : ""}`}
-          onClick={sync}
-          aria-label="Sync roster"
-        >
+        <span className={`sync-status sync-${syncState.toLowerCase()}`}>ESPN • {syncState === "LIVE" ? "Live" : syncState === "SYNCING" ? "Syncing…" : syncState === "REFRESHING" ? "Refreshing…" : syncState === "STALE" ? "Stale" : "Error"}{lastSuccessfulAt && syncState !== "SYNCING" && <small>Updated {age === 0 ? "just now" : `${age}m ago`}</small>}</span>
+        <button className={`sync-button ${syncing ? "syncing" : ""}`} onClick={() => void onSync()} disabled={syncing} aria-label="Refresh ESPN data">
           <RefreshCw size={17} />
         </button>
       </div>
@@ -1023,11 +1031,13 @@ function MovesWorkspace({
   loading,
   tab,
   onTab,
+  onRefresh,
 }: {
   team: TeamSnapshot;
   loading: boolean;
   tab: MoveTab;
   onTab: (tab: MoveTab) => void;
+  onRefresh: () => Promise<void>;
 }) {
   const search = team.engine.search,
     tabs: MoveTab[] = ["Best Moves", "Buy Low", "Sell High", "Waivers"];
@@ -1059,10 +1069,11 @@ function MovesWorkspace({
           {team.dataMode === "stale" ? "STALE SNAPSHOT" : "DEMO DATA"}
         </div>
       )}
-      {team.engine.status !== "READY" || !search ? (
+      {tab === "Best Moves" ? <>
+        <ManualTradeBuilder team={team} onRefresh={onRefresh} />
+        {team.engine.status !== "READY" || !search ? <IntelligenceUnavailable team={team} loading={loading} /> : <TradeWorkspace team={team} />}
+      </> : team.engine.status !== "READY" || !search ? (
         <IntelligenceUnavailable team={team} loading={loading} />
-      ) : tab === "Best Moves" ? (
-        <TradeWorkspace team={team} />
       ) : tab === "Buy Low" ? (
         <SignalWorkspace team={team} kind="buy" />
       ) : tab === "Sell High" ? (
@@ -1091,12 +1102,12 @@ function MovesWorkspace({
 const initialTeam: TeamSnapshot = {
   teamName: "Hi My Name's Charlie McGlaughon",
   abbreviation: "ICMG",
-  week: 1,
+  week: 0,
   record: "0–0",
   projected: 0,
-  players: mockRoster,
-  source: "Mock",
-  dataMode: "mock",
+  players: [],
+  source: "ESPN",
+  dataMode: "live",
   engine: {
     status: "ENGINE_NOT_READY",
     missingRequirements: ["Live ESPN snapshot has not loaded"],
@@ -1106,17 +1117,27 @@ const initialTeam: TeamSnapshot = {
 };
 
 export default function Home() {
-  const [week, setWeek] = useState(1);
+  const [week, setWeek] = useState<number | undefined>(undefined);
   const [activeNav, setActiveNav] = useState("Dashboard");
   const [movesTab, setMovesTab] = useState<MoveTab>("Best Moves");
   const [loading, setLoading] = useState(true);
   const [team, setTeam] = useState<TeamSnapshot>(initialTeam);
+  const [syncSnapshot, setSyncSnapshot] = useState<EspnSyncSnapshot<TeamSnapshot>>({ state: "SYNCING" });
+  const [perspective, setPerspective] = useState<"MY_TEAM" | "MARVIN_TEAM">(() => { try { return window.localStorage.getItem("fcc-team-perspective") === "MARVIN_TEAM" ? "MARVIN_TEAM" : "MY_TEAM"; } catch { return "MY_TEAM"; } });
+  const controllerRef = useRef<EspnSyncController<TeamSnapshot> | undefined>(undefined);
+  const weekRef = useRef(week);
+  const includeSearchRef = useRef(false);
+  const syncSetWeekRef = useRef(false);
+  const perspectiveRef = useRef(perspective);
+  useEffect(() => { perspectiveRef.current = perspective; try { window.localStorage.setItem("fcc-team-perspective", perspective); } catch { /* storage unavailable */ } }, [perspective]);
+  useEffect(() => { weekRef.current = week; includeSearchRef.current = activeNav === "Trades" || activeNav === "Waivers"; }, [week, activeNav]);
   const loadTeam = useCallback(
-    async (targetWeek: number, includeSearch = false) => {
+    async (targetWeek: number | undefined, includeSearch = false, force = false) => {
       setLoading(true);
       try {
+        const weekParam = targetWeek === undefined ? "" : `week=${targetWeek}&`;
         const response = await fetch(
-          `/api/espn?week=${targetWeek}${includeSearch ? "&includeSearch=1" : ""}`,
+          `/api/espn?${weekParam}perspective=${perspectiveRef.current}&${includeSearch ? "includeSearch=1&" : ""}${force ? "refresh=1" : ""}`.replace(/[?&]$/, ""),
           { cache: "no-store" },
         );
         const payload = (await response.json()) as Partial<TeamSnapshot> & {
@@ -1125,31 +1146,24 @@ export default function Home() {
         if (!response.ok || !payload.players) {
           setTeam((current) => ({
             ...current,
-            week: targetWeek,
-            dataMode: "mock",
-            source: "Mock",
-            projected: 0,
-            engine: payload.engine ?? {
-              status: "ENGINE_NOT_READY",
-              missingRequirements: [payload.error ?? "Live ESPN sync failed"],
-              warnings: [],
-              asOf: new Date().toISOString(),
-            },
+            ...(targetWeek === undefined ? {} : { week: targetWeek }),
+            dataMode: current.players.length ? "stale" : "live",
+            source: "ESPN",
+            engine: payload.engine ?? current.engine,
           }));
-        } else setTeam(payload as TeamSnapshot);
+        } else {
+          setTeam(payload as TeamSnapshot);
+          if (targetWeek === undefined) {
+            syncSetWeekRef.current = true;
+            setWeek(payload.week);
+          }
+          return payload as TeamSnapshot;
+        }
       } catch {
         setTeam((current) => ({
           ...current,
-          week: targetWeek,
-          dataMode: "mock",
-          source: "Mock",
-          projected: 0,
-          engine: {
-            status: "ENGINE_NOT_READY",
-            missingRequirements: ["Live ESPN sync failed"],
-            warnings: [],
-            asOf: new Date().toISOString(),
-          },
+          ...(targetWeek === undefined ? {} : { week: targetWeek }),
+          dataMode: current.players.length ? "stale" : "live",
         }));
       } finally {
         setLoading(false);
@@ -1158,11 +1172,47 @@ export default function Home() {
     [],
   );
   useEffect(() => {
-    const request = window.setTimeout(() => {
-      void loadTeam(week, activeNav === "Trades" || activeNav === "Waivers");
-    }, 0);
-    return () => window.clearTimeout(request);
-  }, [week, activeNav, loadTeam]);
+    const controller = new EspnSyncController<TeamSnapshot>({
+      request: async (force) => {
+        const requestWeek = weekRef.current;
+        const payload = await loadTeam(requestWeek, includeSearchRef.current, force);
+        if (!payload) throw new Error("ESPN sync failed");
+        return payload;
+      },
+      isStale: (payload) => payload.dataMode === "stale",
+      successfulAt: (payload) => {
+        const value = payload.sync?.lastSuccessfulAt;
+        return value ? Date.parse(value) : undefined;
+      },
+    });
+    controllerRef.current = controller;
+    const unsubscribe = controller.subscribe(setSyncSnapshot);
+    const onActivate = () => { if (document.visibilityState === "visible") void controller.activate(); };
+    window.addEventListener("focus", onActivate);
+    document.addEventListener("visibilitychange", onActivate);
+    controller.start();
+    return () => { window.removeEventListener("focus", onActivate); document.removeEventListener("visibilitychange", onActivate); unsubscribe(); controller.stop(); };
+  }, [loadTeam]);
+  useEffect(() => {
+    if (activeNav !== "Trades" && activeNav !== "Waivers") return;
+    void controllerRef.current?.refresh(false).then((payload) => {
+      if (payload && !payload.engine.search)
+        return controllerRef.current?.refresh(true);
+    });
+  }, [activeNav, loadTeam]);
+  useEffect(() => {
+    if (syncSetWeekRef.current) {
+      syncSetWeekRef.current = false;
+      return;
+    }
+    const refresh = controllerRef.current?.refresh(true);
+    if (!refresh) return;
+    void refresh.then((payload) => {
+      if (payload && weekRef.current !== undefined && weekRef.current !== payload.week)
+        void controllerRef.current?.refresh(true);
+    });
+  }, [week]);
+  useEffect(() => { if (controllerRef.current) void controllerRef.current.refresh(true); }, [perspective]);
   const changeNav = (item: string) => {
     if (item === "Trades") setMovesTab("Best Moves");
     if (item === "Waivers") setMovesTab("Waivers");
@@ -1176,7 +1226,11 @@ export default function Home() {
         <TopBar
           week={week}
           setWeek={setWeek}
-          onSync={() => loadTeam(week, movesActive)}
+          onSync={async () => { await controllerRef.current?.refresh(true); }}
+          syncState={syncSnapshot.state}
+          lastSuccessfulAt={syncSnapshot.lastSuccessfulAt}
+          team={team}
+          onPerspective={(next) => { if (next === "MARVIN_TEAM" && !team.perspectives?.find((item) => item.perspective === next)?.available) return; setPerspective(next); }}
         />
         <div className="content-wrap">
           {movesActive ? (
@@ -1185,6 +1239,7 @@ export default function Home() {
               loading={loading}
               tab={movesTab}
               onTab={(tab) => setMovesTab(tab)}
+              onRefresh={async () => { await controllerRef.current?.refresh(true); }}
             />
           ) : activeNav !== "Dashboard" ? (
             <section className="placeholder-view">

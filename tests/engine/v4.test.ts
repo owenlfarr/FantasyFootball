@@ -111,7 +111,8 @@ test("historical and live nflverse providers use the same all-player team-carry 
   assert.equal(live.usage["100"][0].metrics.carryShare, 10 / 12);
 });
 
-test("independent market consensus is outlier-resistant and never changes fundamental forecasts", () => {
+test("independent market consensus is outlier-resistant and never changes fundamental forecasts", (context) => {
+  context.mock.method(Date, "now", () => Date.parse(asOf));
   const ps = [player("1", "Alpha", "WR", "ATL", 15), player("2", "Beta", "WR", "NYJ", 10), player("3", "Gamma", "RB", "DET", 12)];
   const league = snapshot(ps);
   const baseline = buildLeagueIntelligence(league);

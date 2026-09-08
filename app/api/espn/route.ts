@@ -15,7 +15,10 @@ import {
   resetEngineProfile,
   rosteredPlayerIds,
   searchTrades,
+  evaluateManualTrade,
   validateLeagueSnapshot,
+  resolveTeamPerspectives,
+  selectPerspective,
 } from "@/src/engine";
 import { slotName } from "@/src/engine/league/espnMappings";
 import { loadLiveLeagueSnapshot } from "@/src/server/espnLeague";
@@ -38,6 +41,11 @@ import type { DashboardSnapshot, Player } from "../../data";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonRecord = Record<string, any>;
 const MAX_WEEK = 18;
+const ESPN_CACHE_MS = 600_000;
+function snapshotFingerprint(snapshot: LeagueSnapshot): string {
+  const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key === "asOf" || key === "retrievedAt" ? "" : stable(item)])) : value;
+  return JSON.stringify(stable({ week: snapshot.currentWeek, settings: snapshot.settings, teams: snapshot.teams, players: snapshot.players, freeAgentIds: snapshot.freeAgentIds, waiverPlayerIds: snapshot.waiverPlayerIds, schedule: snapshot.schedule }));
+}
 let snapshotCache:
   | {
       key: string;
@@ -46,6 +54,10 @@ let snapshotCache:
       snapshot: LeagueSnapshot;
       intelligence: LeagueIntelligence;
       plausibilityContext: PlausibilityContext;
+      evaluationSnapshot: LeagueSnapshot;
+      lastSuccessfulAt: string;
+      fingerprint: string;
+      dashboardResponses: Map<string, DashboardSnapshot>;
     }
   | undefined;
 
@@ -118,7 +130,12 @@ function dashboardResponse(
   intelligence?: LeagueIntelligence,
   plausibilityContext?: PlausibilityContext,
   compactSearch = false,
+  sync?: { lastSuccessfulAt: string; snapshotVersion?: string },
+  perspective: "MY_TEAM" | "MARVIN_TEAM" = "MY_TEAM",
 ): DashboardSnapshot {
+  const resolutions = resolveTeamPerspectives(snapshot);
+  const selected = resolutions.find((item) => item.perspective === perspective);
+  snapshot = selectPerspective(snapshot, selected?.available ? perspective : "MY_TEAM");
   const validation = validateLeagueSnapshot(snapshot);
   const primary = snapshot.teams.find(
     (team) => team.id === snapshot.primaryTeamId,
@@ -140,6 +157,7 @@ function dashboardResponse(
       opponent: `W${requestedWeek}`,
       status: statusLabel(player?.injuryStatus),
       lineupSlotId: entry.assignedSlotId,
+      isStarter: entry.location === "active",
     };
   });
   const record = `${primary.record.wins}–${primary.record.losses}${primary.record.ties ? `–${primary.record.ties}` : ""}`;
@@ -153,11 +171,23 @@ function dashboardResponse(
       },
     ]),
   );
+  const teams = snapshot.teams.map((team) => ({
+    id: team.id,
+    name: team.name,
+    abbreviation: team.abbreviation,
+    players: team.roster.map((entry) => {
+      const player = snapshot.players[entry.playerId];
+      const forecast = player?.forecasts.find((item) => item.week === requestedWeek);
+      return { id: entry.playerId, name: player?.name ?? `Player ${entry.playerId}`, initials: initials(player?.name ?? "?"), team: player?.nflTeam ?? "UNK", position: player?.primaryPosition ?? "UNKNOWN", slot: slotName(entry.assignedSlotId) ?? `Slot ${entry.assignedSlotId}`, group: entry.location === "active" ? "Starters" as const : "Bench" as const, projected: forecast?.mean ?? 0, forecast: forecast?.mean ?? 0, isStarter: entry.location === "active", opponent: `W${requestedWeek}`, status: statusLabel(player?.injuryStatus), lineupSlotId: entry.assignedSlotId };
+    }),
+  }));
   if (validation.status !== "READY")
     return {
       leagueId: snapshot.id,
       season: snapshot.season,
       primaryTeamId: snapshot.primaryTeamId,
+      selectedPerspective: selected?.available ? perspective : "MY_TEAM",
+      perspectives: resolutions.map(({ perspective, label, teamName, available }) => ({ perspective, label, teamName, available })),
       teamName: primary.name,
       abbreviation: primary.abbreviation ?? "",
       week: requestedWeek,
@@ -165,6 +195,8 @@ function dashboardResponse(
       projected: 0,
       players: displayRoster,
       playerDirectory,
+      teams,
+      sync,
       source: "ESPN",
       dataMode: snapshot.dataMode,
       engine: {
@@ -233,6 +265,8 @@ function dashboardResponse(
     leagueId: snapshot.id,
     season: snapshot.season,
     primaryTeamId: snapshot.primaryTeamId,
+    selectedPerspective: selected?.available ? perspective : "MY_TEAM",
+    perspectives: resolutions.map(({ perspective, label, teamName, available }) => ({ perspective, label, teamName, available })),
     teamName: primary.name,
     abbreviation: primary.abbreviation ?? "",
     week: requestedWeek,
@@ -240,6 +274,8 @@ function dashboardResponse(
     projected: currentLineup?.projectedPoints ?? 0,
     players: displayRoster,
     playerDirectory,
+    teams,
+    sync,
     source: "ESPN",
     dataMode: snapshot.dataMode,
     engine: {
@@ -276,38 +312,52 @@ function dashboardResponse(
 }
 
 export async function GET(request: Request) {
-  const requestedWeek = Math.min(
-    MAX_WEEK,
-    Math.max(1, Number(new URL(request.url).searchParams.get("week")) || 1),
-  );
-  const includeSearch =
-    new URL(request.url).searchParams.get("includeSearch") === "1";
-  const compactSearch = new URL(request.url).searchParams.get("compact") === "1";
+  const params = new URL(request.url).searchParams;
+  const weekParam = params.get("week");
+  const requestedWeek = weekParam === null ? undefined : Math.min(MAX_WEEK, Math.max(1, Number(weekParam) || 1));
+  const includeSearch = params.get("includeSearch") === "1";
+  const compactSearch = params.get("compact") === "1";
+  const requestedPerspective = params.get("perspective") === "MARVIN_TEAM" ? "MARVIN_TEAM" : "MY_TEAM";
+  const forceRefresh = params.get("refresh") === "1";
   try {
-    const requested = requestedWeek;
     const cacheKey = `${process.env.ESPN_LEAGUE_ID}:${process.env.ESPN_SEASON_ID}:${process.env.ESPN_TEAM_ID}`;
     if (
       snapshotCache?.key === cacheKey &&
-      snapshotCache.expiresAt > Date.now() &&
-      requestedWeek >= snapshotCache.firstWeek
+      !forceRefresh && snapshotCache.expiresAt > Date.now()
     ) {
+      const responseWeek = requestedWeek ?? snapshotCache.snapshot.currentWeek;
+      const responseKey = `${responseWeek}|${requestedPerspective}|${includeSearch ? "search" : "dashboard"}|${compactSearch ? "compact" : "full"}`;
+      const cachedResponse = snapshotCache.dashboardResponses.get(responseKey);
+      if (cachedResponse) return NextResponse.json({ ...cachedResponse, sync: { ...cachedResponse.sync, lastSuccessfulAt: snapshotCache.lastSuccessfulAt, snapshotVersion: snapshotCache.snapshot.provenance.version } }, { headers: { "Cache-Control": "no-store" } });
       const cached =
-        snapshotCache.snapshot.currentWeek === requestedWeek
+        snapshotCache.snapshot.currentWeek === responseWeek
           ? snapshotCache.snapshot
-          : { ...snapshotCache.snapshot, currentWeek: requestedWeek };
-      return NextResponse.json(
-        dashboardResponse(
+          : { ...snapshotCache.snapshot, currentWeek: responseWeek };
+      const response = dashboardResponse(
           cached,
-          requestedWeek,
+          responseWeek,
           includeSearch,
           snapshotCache.intelligence,
           snapshotCache.plausibilityContext,
-          compactSearch,
-        ),
-        { headers: { "Cache-Control": "no-store" } },
-      );
+          compactSearch, { lastSuccessfulAt: snapshotCache.lastSuccessfulAt, snapshotVersion: snapshotCache.snapshot.provenance.version }, requestedPerspective,
+        );
+      snapshotCache.dashboardResponses.set(responseKey, response);
+      return NextResponse.json(response, { headers: { "Cache-Control": "no-store" } });
     }
-    const {snapshot,raw:base} = await loadLiveLeagueSnapshot(requested);
+    const {snapshot,raw:base} = await loadLiveLeagueSnapshot(requestedWeek);
+    const responseWeek = requestedWeek ?? snapshot.currentWeek;
+    const fingerprint = snapshotFingerprint(snapshot);
+    const previous = snapshotCache?.key === cacheKey && snapshotCache.fingerprint === fingerprint ? snapshotCache : undefined;
+    if (previous) {
+      previous.snapshot = snapshot;
+      previous.expiresAt = Date.now() + ESPN_CACHE_MS;
+      previous.lastSuccessfulAt = new Date().toISOString();
+      const responseKey = `${responseWeek}|${requestedPerspective}|${includeSearch ? "search" : "dashboard"}|${compactSearch ? "compact" : "full"}`;
+      const cachedResponse = previous.dashboardResponses.get(responseKey);
+      const response = cachedResponse ? { ...cachedResponse, sync: { ...cachedResponse.sync, lastSuccessfulAt: previous.lastSuccessfulAt, snapshotVersion: snapshot.provenance.version } } : dashboardResponse(snapshot, responseWeek, includeSearch, previous.intelligence, previous.plausibilityContext, compactSearch, { lastSuccessfulAt: previous.lastSuccessfulAt, snapshotVersion: snapshot.provenance.version }, requestedPerspective);
+      previous.dashboardResponses.set(responseKey, response);
+      return NextResponse.json(response, { headers: { "Cache-Control": "no-store" } });
+    }
     let history: IntelligenceHistoryRecord[] = [];
     try {
       history = await loadIntelligenceHistory(
@@ -376,35 +426,44 @@ export async function GET(request: Request) {
         "Historical intelligence could not be persisted for this refresh.",
       );
     }
+    const evaluationSnapshot = applyFundamentalForecasts(snapshot, intelligence);
     snapshotCache = {
       key: cacheKey,
-      firstWeek: requestedWeek,
-      expiresAt: Date.now() + 60_000,
+      firstWeek: snapshot.currentWeek,
+      expiresAt: Date.now() + ESPN_CACHE_MS,
       snapshot,
       intelligence,
       plausibilityContext,
+      evaluationSnapshot,
+      lastSuccessfulAt: new Date().toISOString(),
+      fingerprint,
+      dashboardResponses: new Map(),
     };
+    const responseKey = `${responseWeek}|${requestedPerspective}|${includeSearch ? "search" : "dashboard"}|${compactSearch ? "compact" : "full"}`;
+    const response = dashboardResponse(snapshot, responseWeek, includeSearch, snapshotCache.intelligence, snapshotCache.plausibilityContext, compactSearch, { lastSuccessfulAt: snapshotCache.lastSuccessfulAt, snapshotVersion: snapshot.provenance.version }, requestedPerspective);
+    snapshotCache.dashboardResponses.set(responseKey, response);
     return NextResponse.json(
-      dashboardResponse(snapshot, requestedWeek, includeSearch, intelligence, plausibilityContext, compactSearch),
+      response,
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (caught) {
     const error = caught as Error & { status?: number };
     console.error("ESPN league sync failed", error.message);
-    if (snapshotCache && requestedWeek >= snapshotCache.firstWeek) {
+    const responseWeek = requestedWeek ?? snapshotCache?.snapshot.currentWeek;
+    if (snapshotCache && responseWeek !== undefined) {
       const stale = {
         ...snapshotCache.snapshot,
-        currentWeek: requestedWeek,
+        currentWeek: responseWeek,
         dataMode: "stale" as const,
       };
       return NextResponse.json(
         dashboardResponse(
           stale,
-          requestedWeek,
+          responseWeek,
           includeSearch,
           snapshotCache.intelligence,
           snapshotCache.plausibilityContext,
-          compactSearch,
+          compactSearch, { lastSuccessfulAt: snapshotCache.lastSuccessfulAt, snapshotVersion: snapshotCache.snapshot.provenance.version }, requestedPerspective,
         ),
         { headers: { "Cache-Control": "no-store" } },
       );
@@ -430,5 +489,19 @@ export async function GET(request: Request) {
       },
       { status, headers: { "Cache-Control": "no-store" } },
     );
+  }
+}
+
+export async function POST(request: Request) {
+  if (!snapshotCache || snapshotCache.expiresAt <= Date.now() || snapshotCache.snapshot.dataMode !== "live")
+    return NextResponse.json({ code: "REFRESH_REQUIRED", error: "Refresh ESPN before evaluating a trade." }, { status: 409 });
+  try {
+    const body = await request.json() as { teamBId?: string; teamAGives?: string[]; teamBGives?: string[]; perspective?: "MY_TEAM" | "MARVIN_TEAM" };
+    if (!body.teamBId || !Array.isArray(body.teamAGives) || !Array.isArray(body.teamBGives)) throw new Error("Opponent and player packages are required.");
+    const contextual = selectPerspective(snapshotCache.evaluationSnapshot, body.perspective ?? "MY_TEAM");
+    const result = evaluateManualTrade(contextual, { teamBId: body.teamBId, teamAGives: body.teamAGives, teamBGives: body.teamBGives }, snapshotCache.intelligence, { ...snapshotCache.plausibilityContext, snapshot: contextual });
+    return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
+  } catch (caught) {
+    return NextResponse.json({ error: caught instanceof Error ? caught.message : "Invalid trade." }, { status: 400 });
   }
 }

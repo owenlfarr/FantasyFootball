@@ -8,6 +8,8 @@ export type Player = {
   slot: string;
   group: Exclude<RosterFilter, "All">;
   projected: number;
+  forecast?: number;
+  isStarter?: boolean;
   opponent: string;
   status?: string;
   lineupSlotId?: number;
@@ -55,16 +57,30 @@ export type EngineStatus = {
     >;
   };
 };
+export type LeagueTeamSummary = {
+  id: string;
+  name: string;
+  abbreviation?: string;
+  players: Player[];
+};
+export type SyncMetadata = {
+  lastSuccessfulAt: string;
+  snapshotVersion?: string;
+};
 export type TeamSnapshot = {
   leagueId?: string;
   season?: number;
   primaryTeamId?: string;
+  selectedPerspective?: "MY_TEAM" | "MARVIN_TEAM";
+  perspectives?: Array<{ perspective: "MY_TEAM" | "MARVIN_TEAM"; label: string; teamName?: string; available: boolean }>;
   teamName: string;
   abbreviation: string;
   week: number;
   record: string;
   projected: number;
   players: Player[];
+  teams?: LeagueTeamSummary[];
+  sync?: SyncMetadata;
   playerDirectory?: Record<
     string,
     { name: string; position: string; team: string }

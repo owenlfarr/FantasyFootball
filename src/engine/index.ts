@@ -1,4 +1,5 @@
 export * from "./types";
+export * from "./perspective";
 export * from "./forecast/ForecastProvider";
 export * from "./league/normalizeEspnLeague";
 export * from "./league/validateLeagueSnapshot";
@@ -6,6 +7,7 @@ export * from "./lineup/optimizeLineup";
 export * from "./roster/evaluateRoster";
 export * from "./roster/positionalNeeds";
 export * from "./transactions/evaluateTransactions";
+export * from "./transactions/evaluateManualTrade";
 export * from "./search/types";
 export * from "./search/characterizeAssets";
 export * from "./search/opponentFit";
